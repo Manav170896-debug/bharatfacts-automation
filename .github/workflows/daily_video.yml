@@ -1,0 +1,54 @@
+name: Daily BharatFacts Videos (4/day)
+
+on:
+  schedule:
+    - cron: '0 20 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install FFmpeg
+        run: sudo apt-get install -y ffmpeg
+      - name: Install packages
+        run: pip install anthropic requests google-api-python-client google-auth-oauthlib google-auth-httplib2
+      - name: English video 1
+        env:
+          CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          PIXABAY_API_KEY:    ${{ secrets.PIXABAY_API_KEY }}
+          GOOGLE_API_KEY:     ${{ secrets.GOOGLE_API_KEY }}
+        run: python youtube_automation.py english
+      - name: English video 2
+        env:
+          CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          PIXABAY_API_KEY:    ${{ secrets.PIXABAY_API_KEY }}
+          GOOGLE_API_KEY:     ${{ secrets.GOOGLE_API_KEY }}
+        run: python youtube_automation.py english
+      - name: Hindi video 1
+        env:
+          CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          PIXABAY_API_KEY:    ${{ secrets.PIXABAY_API_KEY }}
+          GOOGLE_API_KEY:     ${{ secrets.GOOGLE_API_KEY }}
+        run: python youtube_automation.py hindi
+      - name: Hindi video 2
+        env:
+          CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          PIXABAY_API_KEY:    ${{ secrets.PIXABAY_API_KEY }}
+          GOOGLE_API_KEY:     ${{ secrets.GOOGLE_API_KEY }}
+        run: python youtube_automation.py hindi
+      - name: Upload all videos
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-${{ github.run_id }}
+          path: output/
+          retention-days: 7
