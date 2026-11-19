@@ -1,0 +1,52 @@
+name: Daily BharatFacts Video
+
+on:
+  schedule:
+    - cron: '0 20 * * 1-5'   # Mon–Fri 8 AM AEST (UTC+10)
+  workflow_dispatch:          # Manual trigger from GitHub UI
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps (FFmpeg)
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Install Python packages
+        run: |
+          pip install anthropic requests \
+            google-api-python-client \
+            google-auth-oauthlib \
+            google-auth-httplib2
+
+      - name: Run English video
+        env:
+          CLAUDE_API_KEY:          ${{ secrets.CLAUDE_API_KEY }}
+          ELEVENLABS_API_KEY:      ${{ secrets.ELEVENLABS_API_KEY }}
+          PIXABAY_API_KEY:         ${{ secrets.PIXABAY_API_KEY }}
+          GOOGLE_API_KEY:          ${{ secrets.GOOGLE_API_KEY }}
+          YOUTUBE_OAUTH_TOKEN:     ${{ secrets.YOUTUBE_OAUTH_TOKEN }}
+        run: python youtube_automation.py english
+
+      - name: Run Hindi video
+        env:
+          CLAUDE_API_KEY:          ${{ secrets.CLAUDE_API_KEY }}
+          ELEVENLABS_API_KEY:      ${{ secrets.ELEVENLABS_API_KEY }}
+          PIXABAY_API_KEY:         ${{ secrets.PIXABAY_API_KEY }}
+          GOOGLE_API_KEY:          ${{ secrets.GOOGLE_API_KEY }}
+          YOUTUBE_OAUTH_TOKEN:     ${{ secrets.YOUTUBE_OAUTH_TOKEN }}
+        run: python youtube_automation.py hindi
+
+      - name: Upload videos as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-${{ github.run_id }}
+          path: output/
+          retention-days: 7
