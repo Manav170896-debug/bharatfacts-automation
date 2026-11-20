@@ -1,325 +1,265 @@
 """
-BharatFacts Automated YouTube Channel
-Generates faceless videos daily and saves them for upload
-Topics: AI, tech, viral news, GTA 6, Indian facts
-"""
+BharatFacts automated Shorts pipeline (animated version)
 
+  1. Claude writes a ~50s script split into 6-8 scenes, each with a picture prompt
+  2. Cloudflare Workers AI (free tier) draws a cartoon picture for every scene
+  3. ElevenLabs reads the script and returns word timings
+  4. renderer.py animates it: camera moves, transitions, word-by-word captions
+  5. Uploads to YouTube if OAuth secrets are set
+
+Run:  python youtube_automation.py english 0      (language, slot number for the day)
+"""
+from __future__ import annotations
+
+import base64
+import json
 import os
 import random
-import subprocess
-import json
-import requests
+import re
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
 
-# ─── API Keys (set these as GitHub Secrets or env vars) ───────────────────────
-CLAUDE_API_KEY     = os.environ.get("CLAUDE_API_KEY", "")
+import requests
+
+from renderer import MOTIONS, Scene, Word, render
+
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-PIXABAY_API_KEY    = os.environ.get("PIXABAY_API_KEY", "")
-GOOGLE_API_KEY     = os.environ.get("GOOGLE_API_KEY", "")
-YOUTUBE_CHANNEL_ID = os.environ.get("YOUTUBE_CHANNEL_ID", "UCpgR1Kywm5jBs967EUVEt2Q")  # BharatFacts Hindi
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "")
+CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "")
 
-# ─── ElevenLabs Voice IDs ──────────────────────────────────────────────────────
-VOICE_EN = "21m00Tcm4TlvDq8ikWAM"   # Rachel – clear English
-VOICE_HI = "pNInz6obpgDQGcFmaJgB"   # Adam  – works well for Hindi-accented English
+VOICE_EN = "21m00Tcm4TlvDq8ikWAM"   # Rachel
+VOICE_HI = "pNInz6obpgDQGcFmaJgB"   # Adam (multilingual v2 handles Hindi)
 
-# ─── Topic Pool ────────────────────────────────────────────────────────────────
+# One fixed look so every scene and every video feels like the same channel.
+STYLE = ("Flat 2D cartoon illustration, bold clean outlines, soft cel shading, vibrant saffron, teal and cream "
+         "colour palette, simple rounded shapes, expressive friendly characters, detailed but uncluttered "
+         "background, educational animation style, vertical composition, no text, no letters, no logos, no watermark")
+
+# Generic, brand-free topics (no game/film characters or real people - those get copyright claims).
 TOPICS_EN = [
-    "GTA 6 – every secret and hidden detail explained",
-    "5 AI facts that will blow your mind",
-    "Why GTA 6 will change gaming forever",
-    "The viral fox video – what really happened",
-    "Top 5 technologies that will replace humans by 2030",
-    "India's secret space missions you never heard about",
-    "5 things nobody tells you about ChatGPT",
-    "The real story behind the most viral meme of 2026",
-    "GTA 6 Lucia's full backstory explained",
-    "5 Indian inventions that changed the world",
-]
-
-TOPICS_HI = [
-    "GTA 6 ke har raaz ka explanation",
-    "5 AI facts jo aapka dimaag hila denge",
-    "GTA 6 kyu gaming ko badal dega",
-    "Viral fox video ki poori sachchi kahani",
-    "2030 tak ye 5 technologies humans ko replace kar denge",
-    "India ke secret space missions jo aapne kabhi nahi sune",
-    "ChatGPT ke baare mein 5 baat jo koi nahi batata",
-    "2026 ke sabse viral meme ki asli kahani",
-    "GTA 6 Lucia ki poori kahani",
-    "5 Indian inventions jinhone duniya badal di",
+    "Why India has only one time zone", "The stepwell that is 13 storeys deep",
+    "How the Indian Railways feeds millions every day", "The village where every house has no door",
+    "Why monsoon rains arrive almost on the same date every year", "How Chandrayaan landed near the Moon's south pole",
+    "The world's highest cricket ground", "Why India has 22 official languages",
+    "How the number zero changed the world", "The floating post office on Dal Lake",
+    "Why Mumbai's dabbawalas almost never make mistakes", "The living root bridges of Meghalaya",
+    "How chess was born in India", "Why the Taj Mahal changes colour during the day",
+    "The town where it rains more than anywhere on Earth", "How UPI made India the world leader in digital payments",
+    "The 3,000-year-old iron pillar that never rusts", "Why peacocks became India's national bird",
+    "How AI is predicting monsoon floods", "5 things your phone knows about you",
+    "Why your phone battery dies faster in winter", "How robots are farming in India",
+    "The temple kitchen that feeds 100,000 people a day", "Why the Ganges is called a self-cleaning river",
+    "How satellites help farmers decide when to sow", "The Indian island with its own tribe nobody may visit",
+    "Why Indian trains have yellow and white stripes", "How ISRO sends missions for less than a movie budget",
+    "The desert festival lit by thousands of lamps", "Why ChatGPT sometimes makes things up",
 ]
 
 
-# ─── 1. SCRIPT GENERATION (Claude API) ────────────────────────────────────────
-def generate_script(topic: str, language: str = "english") -> str:
+# --- 1. Script + scene plan (Claude) -------------------------------------------
+def plan_video(topic: str, language: str) -> dict:
     import anthropic
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    lang = ("Write the narration in natural spoken Hindi using Devanagari script (simple everyday words, "
+            "English terms like UPI/AI are fine)." if language == "hindi"
+            else "Write the narration in simple, punchy spoken English.")
+    prompt = f"""You write scripts for BharatFacts, a faceless YouTube Shorts channel of fun animated facts.
+Topic: {topic}
 
-    lang_instruction = (
-        "Write in simple, clear Hindi (Devanagari script is fine but Roman Hindi also OK)."
-        if language == "hindi"
-        else "Write in simple, punchy English."
-    )
-
-    prompt = f"""You are a scriptwriter for a faceless YouTube channel like SG Graphy.
-Write a 3-minute narration script about: {topic}
-
+{lang}
 Rules:
-- {lang_instruction}
-- Hook in first 10 seconds (start with a surprising fact or question)
-- 5-7 key points, each 15-20 seconds of speech
-- End with: "Subscribe and hit the bell for daily facts!"
-- NO stage directions, NO [MUSIC], NO visual cues — just the spoken words
-- Keep it conversational and exciting
-"""
+- Total narration 110-130 words (about 45-55 seconds when spoken). Only state facts you are confident are true.
+- First sentence is a hook: a surprising fact or question that makes people keep watching.
+- Split into 6-8 scenes. Each scene = 1-2 short sentences of narration.
+- Last scene ends with a short call to follow for more facts.
+- For each scene write image_prompt in ENGLISH: one vivid, concrete visual moment that matches the narration
+  (who/what, action, setting, camera angle). Reuse the same recurring narrator character where it fits:
+  "a cheerful young Indian guide in a teal hoodie". Never describe real people, celebrities, brands, logos,
+  video-game or movie characters, flags with text, or any written words.
+- hook_text: 2-5 word on-screen hook in the same language as the narration.
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text
+Return ONLY JSON, no markdown:
+{{"title": "...max 70 chars, ends with #Shorts", "description": "2-3 sentences", "tags": ["..."],
+  "hook_text": "...", "scenes": [{{"narration": "...", "image_prompt": "..."}}]}}"""
+    msg = client.messages.create(model="claude-sonnet-4-6", max_tokens=2000,
+                                 messages=[{"role": "user", "content": prompt}])
+    text = msg.content[0].text.strip()
+    text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
+    plan = json.loads(text)
+    assert 4 <= len(plan["scenes"]) <= 10, "unexpected scene count"
+    return plan
 
 
-# ─── 2. VOICEOVER (ElevenLabs) ────────────────────────────────────────────────
-def generate_voiceover(text: str, output_path: Path, language: str = "english") -> Path:
-    voice_id = VOICE_HI if language == "hindi" else VOICE_EN
+# --- 2. Scene pictures (Cloudflare Workers AI, free tier) ---------------------
+CF_MODELS = [  # tried in order; first is native vertical
+    ("@cf/leonardo/phoenix-1.0", {"width": 1088, "height": 1920}),
+    ("@cf/black-forest-labs/flux-1-schnell", {"steps": 6}),
+]
 
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": ELEVENLABS_API_KEY,
-    }
-    payload = {
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-    }
 
-    r = requests.post(url, json=payload, headers=headers, stream=True)
+def cf_image(prompt: str, dest: Path) -> bool:
+    if not (CF_ACCOUNT_ID and CF_API_TOKEN):
+        return False
+    for model, extra in CF_MODELS:
+        for attempt in range(2):
+            try:
+                r = requests.post(
+                    f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{model}",
+                    headers={"Authorization": f"Bearer {CF_API_TOKEN}"},
+                    json={"prompt": f"{prompt}. {STYLE}", **extra}, timeout=120)
+                if r.status_code == 200:
+                    if "json" in r.headers.get("Content-Type", ""):
+                        dest.write_bytes(base64.b64decode(r.json()["result"]["image"]))
+                    else:
+                        dest.write_bytes(r.content)
+                    return True
+                print(f"   {model} -> HTTP {r.status_code}: {r.text[:150]}")
+                if r.status_code in (400, 401, 403, 404):
+                    break  # not retryable on this model
+            except requests.RequestException as e:
+                print(f"   {model} error: {e}")
+            time.sleep(3)
+    return False
+
+
+def pixabay_image(query: str, dest: Path) -> bool:
+    """Fallback if Cloudflare quota is used up: an illustration from Pixabay."""
+    if not PIXABAY_API_KEY:
+        return False
+    r = requests.get("https://pixabay.com/api/", params={
+        "key": PIXABAY_API_KEY, "q": " ".join(query.split()[:5]), "image_type": "illustration",
+        "orientation": "vertical", "safesearch": "true", "per_page": 5}, timeout=30)
+    hits = r.json().get("hits", []) if r.ok else []
+    if not hits:
+        return False
+    dest.write_bytes(requests.get(hits[0]["largeImageURL"], timeout=60).content)
+    return True
+
+
+# --- 3. Voiceover with word timings (ElevenLabs) ------------------------------
+def voiceover(text: str, language: str, dest: Path) -> list[Word]:
+    voice = VOICE_HI if language == "hindi" else VOICE_EN
+    r = requests.post(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{voice}/with-timestamps",
+        headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+        json={"text": text, "model_id": "eleven_multilingual_v2",
+              "voice_settings": {"stability": 0.45, "similarity_boost": 0.75, "style": 0.3}},
+        timeout=180)
     r.raise_for_status()
-
-    with open(output_path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=4096):
-            if chunk:
-                f.write(chunk)
-
-    print(f"  ✅ Voiceover saved: {output_path}")
-    return output_path
-
-
-# ─── 3. STOCK FOOTAGE (Pixabay) ───────────────────────────────────────────────
-def get_stock_videos(query: str, count: int = 6) -> list[str]:
-    url = "https://pixabay.com/api/videos/"
-    params = {
-        "key": PIXABAY_API_KEY,
-        "q": query,
-        "per_page": count,
-        "video_type": "film",
-        "orientation": "vertical",
-        "safesearch": "true",
-        "order": "popular",
-    }
-    r = requests.get(url, params=params)
-    r.raise_for_status()
-    hits = r.json().get("hits", [])
-
-    urls = []
-    for hit in hits:
-        videos = hit.get("videos", {})
-        for quality in ("medium", "small", "large"):
-            v = videos.get(quality, {})
-            if v.get("url"):
-                urls.append(v["url"])
-                break
-
-    # Fallback to horizontal if vertical returns nothing
-    if not urls:
-        params.pop("orientation")
-        r = requests.get(url, params=params)
-        for hit in r.json().get("hits", []):
-            videos = hit.get("videos", {})
-            for quality in ("medium", "small"):
-                v = videos.get(quality, {})
-                if v.get("url"):
-                    urls.append(v["url"])
-                    break
-
-    return urls[:count]
+    data = r.json()
+    dest.write_bytes(base64.b64decode(data["audio_base64"]))
+    al = data.get("alignment") or data.get("normalized_alignment")
+    chars, starts, ends = al["characters"], al["character_start_times_seconds"], al["character_end_times_seconds"]
+    words, cur, ws = [], "", None
+    for c, s, e in zip(chars, starts, ends):
+        if c.isspace():
+            if cur:
+                words.append(Word(cur, ws, last_end))
+            cur, ws = "", None
+            continue
+        if ws is None:
+            ws = s
+        cur += c
+        last_end = e
+    if cur:
+        words.append(Word(cur, ws, last_end))
+    return words
 
 
-def download_file(url: str, dest: Path) -> Path:
-    r = requests.get(url, stream=True, timeout=60)
-    r.raise_for_status()
-    with open(dest, "wb") as f:
-        for chunk in r.iter_content(8192):
-            f.write(chunk)
-    return dest
+# --- 4. Assemble --------------------------------------------------------------
+def build(plan: dict, language: str, out: Path) -> Path:
+    scenes_in = plan["scenes"]
+    narration = " ".join(s["narration"].strip() for s in scenes_in)
+
+    print("2/4 Voiceover + timings...")
+    audio = out / "voiceover.mp3"
+    words = voiceover(narration, language, audio)
+
+    # map each scene to its first word to get scene start times
+    counts = [len(s["narration"].split()) for s in scenes_in]
+    starts, idx = [], 0
+    for c in counts:
+        starts.append(words[min(idx, len(words) - 1)].start)
+        idx += c
+    starts[0] = 0.0
+    total = words[-1].end + 0.6
+
+    print("3/4 Drawing scenes...")
+    scenes = []
+    for i, s in enumerate(scenes_in):
+        img = out / f"scene_{i}.jpg"
+        ok = cf_image(s["image_prompt"], img) or pixabay_image(s["image_prompt"], img)
+        if not ok:
+            if scenes:  # reuse the previous picture with a different camera move
+                img = scenes[-1].image
+            else:
+                raise RuntimeError("Could not get any scene image")
+        end = starts[i + 1] if i + 1 < len(starts) else total
+        scenes.append(Scene(img, starts[i], end, MOTIONS[i % len(MOTIONS)]))
+        print(f"   scene {i + 1}/{len(scenes_in)} ok")
+
+    print("4/4 Animating...")
+    final = out / "final_video.mp4"
+    render(scenes, words, audio, final, hook=plan.get("hook_text", ""))
+    return final
 
 
-# ─── 4. VIDEO ASSEMBLY (FFmpeg) ────────────────────────────────────────────────
-def get_audio_duration(path: Path) -> float:
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-        capture_output=True, text=True, check=True
-    )
-    return float(result.stdout.strip())
-
-
-def assemble_video(audio_path: Path, clip_paths: list[Path],
-                   output_path: Path, title: str) -> Path:
-    tmp = output_path.parent
-
-    # Write concat list
-    concat_file = tmp / "concat.txt"
-    with open(concat_file, "w") as f:
-        for cp in clip_paths:
-            f.write(f"file '{cp.resolve()}'\n")
-
-    # Concatenate clips
-    bg = tmp / "background.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-         "-i", str(concat_file), "-c", "copy", str(bg)],
-        check=True, capture_output=True
-    )
-
-    duration = get_audio_duration(audio_path)
-
-    # Safe title for drawtext (remove quotes/colons)
-    safe_title = title.replace("'", "").replace('"', '').replace(":", " –")[:50]
-
-    # Build final video: scale to 1080x1920, loop bg, overlay audio + title
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", str(bg),
-        "-i", str(audio_path),
-        "-t", str(duration),
-        "-vf", (
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,"
-            f"drawtext=text='{safe_title}':"
-            "fontcolor=white:fontsize=36:x=(w-text_w)/2:y=80:"
-            "box=1:boxcolor=black@0.6:boxborderw=12,"
-            "drawtext=text='BharatFacts':"
-            "fontcolor=yellow:fontsize=28:x=(w-text_w)/2:y=h-70:"
-            "box=1:boxcolor=black@0.5:boxborderw=8"
-        ),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
-        str(output_path)
-    ], check=True, capture_output=True)
-
-    print(f"  ✅ Video assembled: {output_path}")
-    return output_path
-
-
-# ─── 5. YOUTUBE UPLOAD ────────────────────────────────────────────────────────
-def upload_to_youtube(video_path: Path, title: str, description: str,
-                      oauth_token: str) -> str:
-    """
-    Upload video to YouTube using OAuth token.
-    OAuth token must be obtained first via: python get_oauth_token.py
-    Store the refresh token as YOUTUBE_OAUTH_TOKEN in GitHub Secrets.
-    """
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
+# --- 5. YouTube upload (OAuth refresh token) ----------------------------------
+def upload_to_youtube(video: Path, plan: dict, language: str) -> str | None:
+    cid, csec, rtok = (os.environ.get(k, "") for k in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"))
+    if not (cid and csec and rtok):
+        print(" YouTube secrets not set - video kept as a workflow artifact only.")
+        return None
     from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build as gbuild
+    from googleapiclient.http import MediaFileUpload
 
-    creds = Credentials(token=oauth_token)
-    youtube = build("youtube", "v3", credentials=creds)
-
+    creds = Credentials(None, refresh_token=rtok, client_id=cid, client_secret=csec,
+                        token_uri="https://oauth2.googleapis.com/token",
+                        scopes=["https://www.googleapis.com/auth/youtube.upload"])
+    yt = gbuild("youtube", "v3", credentials=creds, cache_discovery=False)
     body = {
         "snippet": {
-            "title": title[:100],
-            "description": description,
-            "tags": ["facts", "BharatFacts", "viral", "shorts", "GTA6"],
-            "categoryId": "27",  # Education
+            "title": plan["title"][:100],
+            "description": f"{plan['description']}\n\n#Shorts #BharatFacts #Facts",
+            "tags": (plan.get("tags") or [])[:15] + ["BharatFacts", "Shorts"],
+            "categoryId": "27",
+            "defaultLanguage": "hi" if language == "hindi" else "en",
         },
-        "status": {"privacyStatus": "public"},
+        "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False,
+                   "containsSyntheticMedia": True},
     }
-
-    media = MediaFileUpload(str(video_path), mimetype="video/mp4",
-                            resumable=True, chunksize=1024 * 1024)
-    request = youtube.videos().insert(part=",".join(body.keys()),
-                                       body=body, media_body=media)
-
-    response = None
-    while response is None:
-        _, response = request.next_chunk()
-
-    video_id = response["id"]
-    print(f"  ✅ Uploaded: https://youtube.com/watch?v={video_id}")
-    return video_id
+    req = yt.videos().insert(part="snippet,status", body=body,
+                             media_body=MediaFileUpload(str(video), mimetype="video/mp4", resumable=True))
+    resp = None
+    while resp is None:
+        _, resp = req.next_chunk()
+    print(f"  OK Uploaded: https://youtube.com/shorts/{resp['id']}")
+    return resp["id"]
 
 
-# ─── MAIN PIPELINE ────────────────────────────────────────────────────────────
-def run(language: str = "english") -> dict:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = Path("output") / ts
+def pick_topic(language: str, slot: int) -> str:
+    # Hindi videos use the same topic list (Claude writes the Hindi script); offset so it differs from English slots
+    day = datetime.now(timezone.utc).timetuple().tm_yday
+    return TOPICS_EN[(day * 3 + slot + (11 if language == "hindi" else 0)) % len(TOPICS_EN)]
+
+
+def run(language: str = "english", slot: int = 0) -> dict:
+    out = Path("output") / f"{datetime.now():%Y%m%d_%H%M%S}_{language}"
     out.mkdir(parents=True, exist_ok=True)
-
-    topics = TOPICS_HI if language == "hindi" else TOPICS_EN
-    topic = random.choice(topics)
-    print(f"\n🎬 Topic  : {topic}")
-    print(f"🌐 Language: {language}\n")
-
-    # 1. Script
-    print("1/4 Writing script...")
-    script = generate_script(topic, language)
-    (out / "script.txt").write_text(script, encoding="utf-8")
-
-    # 2. Voiceover
-    print("2/4 Generating voiceover...")
-    audio = out / "voiceover.mp3"
-    generate_voiceover(script, audio, language)
-
-    # 3. Stock footage
-    print("3/4 Downloading stock footage...")
-    keywords = " ".join(topic.split()[:4])
-    video_urls = get_stock_videos(keywords, count=6)
-    if not video_urls:
-        video_urls = get_stock_videos("technology city", count=6)
-
-    clips = []
-    for i, url in enumerate(video_urls[:4]):
-        dest = out / f"clip_{i}.mp4"
-        download_file(url, dest)
-        clips.append(dest)
-        print(f"   Downloaded clip {i+1}")
-
-    # 4. Assemble
-    print("4/4 Assembling video...")
-    final = out / "final_video.mp4"
-    assemble_video(audio, clips, final, topic)
-
-    # 5. Upload (only if OAuth token available)
-    oauth_token = os.environ.get("YOUTUBE_OAUTH_TOKEN")
-    video_id = None
-    if oauth_token:
-        print("5/5 Uploading to YouTube...")
-        desc = f"{topic}\n\n{script[:300]}...\n\n#BharatFacts #Shorts #Facts"
-        video_id = upload_to_youtube(final, topic, desc, oauth_token)
-    else:
-        print("ℹ️  No YOUTUBE_OAUTH_TOKEN found — video saved locally only.")
-        print(f"   Upload manually: {final}")
-
-    return {
-        "topic": topic,
-        "language": language,
-        "video": str(final),
-        "script": str(out / "script.txt"),
-        "youtube_id": video_id,
-    }
+    topic = os.environ.get("TOPIC") or pick_topic(language, slot)
+    print(f"\n {topic}  ({language})\n1/4 Planning scenes...")
+    plan = plan_video(topic, language)
+    (out / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    final = build(plan, language, out)
+    vid = upload_to_youtube(final, plan, language)
+    return {"topic": topic, "title": plan["title"], "video": str(final), "youtube_id": vid}
 
 
 if __name__ == "__main__":
-    import sys
     lang = sys.argv[1] if len(sys.argv) > 1 else "english"
-    result = run(lang)
-    print("\n── RESULT ──────────────────────────────────")
-    print(json.dumps(result, indent=2))
+    slot = int(sys.argv[2]) if len(sys.argv) > 2 else random.randint(0, 2)
+    print(json.dumps(run(lang, slot), ensure_ascii=False, indent=2))
