@@ -53,7 +53,7 @@ TOPICS_EN = [
     "How AI is predicting monsoon floods", "5 things your phone knows about you",
     "Why your phone battery dies faster in winter", "How robots are farming in India",
     "The temple kitchen that feeds 100,000 people a day", "Why the Ganges is called a self-cleaning river",
-    "How satellites help farmers decide when to sow", "The Indian island with its own tribe nobody may visit",
+    "How satellites help farmers decide when to sow", "Why Kerala has backwaters instead of lakes",
     "Why Indian trains have yellow and white stripes", "How ISRO sends missions for less than a movie budget",
     "The desert festival lit by thousands of lamps", "Why ChatGPT sometimes makes things up",
 ]
@@ -71,7 +71,7 @@ Topic: {topic}
 
 {lang}
 Rules:
-- Total narration 110-130 words (about 45-55 seconds when spoken). Only state facts you are confident are true.
+- Total narration 100-115 words (about 40-50 seconds when spoken; must stay under 60 seconds). Only state facts you are confident are true.
 - First sentence is a hook: a surprising fact or question that makes people keep watching.
 - Split into 6-8 scenes. Each scene = 1-2 short sentences of narration.
 - Last scene ends with a short call to follow for more facts.
@@ -197,12 +197,12 @@ def build(plan: dict, language: str, out: Path) -> Path:
     scenes = []
     for i, s in enumerate(scenes_in):
         img = out / f"scene_{i}.jpg"
-        ok = cf_image(s["image_prompt"], img) or pixabay_image(s["image_prompt"], img)
-        if not ok:
-            if scenes:  # reuse the previous picture with a different camera move
-                img = scenes[-1].image
+        if not cf_image(s["image_prompt"], img):
+            # never mix in unrelated stock art: reuse an earlier cartoon scene with a different camera move
+            if scenes:
+                img = scenes[max(0, len(scenes) - 2)].image
             else:
-                raise RuntimeError("Could not get any scene image")
+                raise RuntimeError("No scene pictures available (Cloudflare quota?) - skipping this video")
         end = starts[i + 1] if i + 1 < len(starts) else total
         scenes.append(Scene(img, starts[i], end, MOTIONS[i % len(MOTIONS)]))
         print(f"   scene {i + 1}/{len(scenes_in)} ok")
