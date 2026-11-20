@@ -37,7 +37,7 @@ VOICE_HI = "pNInz6obpgDQGcFmaJgB"   # Adam (multilingual v2 handles Hindi)
 # One fixed look so every scene and every video feels like the same channel.
 STYLE = ("Flat 2D cartoon illustration, bold clean outlines, soft cel shading, vibrant saffron, teal and cream "
          "colour palette, simple rounded shapes, expressive friendly characters, detailed but uncluttered "
-         "background, educational animation style, vertical composition, no text, no letters, no logos, no watermark")
+         "background, educational animation style, main subject centred in the frame, no text, no letters, no logos, no watermark")
 
 # Generic, brand-free topics (no game/film characters or real people - those get copyright claims).
 TOPICS_EN = [
@@ -94,14 +94,17 @@ Return ONLY JSON, no markdown:
 
 
 # --- 2. Scene pictures (Cloudflare Workers AI, free tier) ---------------------
-CF_MODELS = [  # tried in order; first is native vertical
-    ("@cf/leonardo/phoenix-1.0", {"width": 1088, "height": 1920}),
+# FLUX schnell costs ~80 of the 10,000 free daily "neurons" per picture, so 24 pictures/day stay free.
+# (Leonardo Phoenix looks similar but costs ~4,000 per picture - it burns the free quota in 2 images.)
+CF_MODELS = [
     ("@cf/black-forest-labs/flux-1-schnell", {"steps": 6}),
 ]
+_cf_quota_hit = False
 
 
 def cf_image(prompt: str, dest: Path) -> bool:
-    if not (CF_ACCOUNT_ID and CF_API_TOKEN):
+    global _cf_quota_hit
+    if not (CF_ACCOUNT_ID and CF_API_TOKEN) or _cf_quota_hit:
         return False
     for model, extra in CF_MODELS:
         for attempt in range(2):
@@ -117,6 +120,9 @@ def cf_image(prompt: str, dest: Path) -> bool:
                         dest.write_bytes(r.content)
                     return True
                 print(f"   {model} -> HTTP {r.status_code}: {r.text[:150]}")
+                if r.status_code == 429:  # daily free quota used up - stop asking for today
+                    _cf_quota_hit = True
+                    return False
                 if r.status_code in (400, 401, 403, 404):
                     break  # not retryable on this model
             except requests.RequestException as e:

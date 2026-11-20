@@ -110,7 +110,13 @@ class _SceneCam:
     """Computes the source crop box for each frame (Ken Burns style)."""
 
     def __init__(self, img: Image.Image, motion: str):
-        self.img = img.convert("RGB")
+        img = img.convert("RGB")
+        # upscale small/square sources once with a high-quality filter so per-frame crops stay sharp
+        if img.height < 1900:
+            k = 2048 / img.height
+            img = img.resize((round(img.width * k), 2048), Image.LANCZOS).filter(
+                ImageFilter.UnsharpMask(radius=2, percent=60, threshold=2))
+        self.img = img
         self.sw, self.sh = self.img.size
         self.motion = motion
         # largest 9:16 box that fits inside the source
